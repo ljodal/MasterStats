@@ -30,7 +30,8 @@ class Parser
       when /^sync/
         index[:syncer] = i
       when /^upload/
-        index[:upload] = i
+        index[:uploader] = i
+        @uploader = true
       when /^bayer/
         index[:bayer] = i
       when /^hdr/
@@ -98,12 +99,18 @@ class Parser
   end
 
   def report
-    methods = ["mean", "standard_deviation", "min", "max", "variance", "mode", ["percentile", 25], "median", ["percentile", 75]]
+    methods = ["mean", "standard_deviation", "min", "max", "variance", "mode", ["percentile", 25], "median", ["percentile", 75], ["percentile", 95.3]]
     report_header(*methods)
+    report_single(:ts_diff, "Timestamp difference", *methods)
     report_line(:ts, :capture, "Capture time", *methods)
     report_line(:capture, :transfer, "Transfer time", *methods)
     report_line(:transfer, :sync, "Sync time", *methods)
-    report_line(:sync, :bayer, "Bayer time", *methods)
+    if @uploader
+      report_line(:sync, :upload, "Upload time", *methods)
+      report_line(:upload, :bayer, "Bayer time", *methods)
+    else
+      report_line(:sync, :bayer, "Bayer time", *methods)
+    end
     report_line(:bayer, :stitch, "Stitch time", *methods)
     report_line(:stitch, :download, "Download time", *methods)
     report_line(:download, :encode, "Encode time", *methods)
@@ -140,6 +147,18 @@ class Parser
 
   def report_line(s1, s2, title, *methods)
     res = agg(s1, s2, *methods)
+
+    print title.ljust(20, ".")
+    print ":"
+    for r in res do
+      print " %12.4f" % (r * 1000)
+    end
+    puts ""
+  end
+
+  def report_single(s, title, *methods)
+    times = @data.map{|e| e[s]}
+    res = methods.map{|e| times.send(*e)}
 
     print title.ljust(20, ".")
     print ":"
