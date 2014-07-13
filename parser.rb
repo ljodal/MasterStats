@@ -1,6 +1,7 @@
 require 'rubygems'
 require 'bundler/setup'
 
+require 'pp'
 require 'csv'
 require 'descriptive_statistics'
 
@@ -10,6 +11,7 @@ class Parser
       timestamps: [],
       captures: [],
       transfers: [],
+      dmas: [],
     }
 
     @data = []
@@ -21,12 +23,18 @@ class Parser
     headers = lines.shift
     headers.each_with_index do |h,i|
       case h
-      when /^timestamp\d+$/
+      when /^timestamp(\d+)$/
+        next if $1.to_i > 2
         index[:timestamps] << i
-      when /^dolphin\d+$/
+      when /^dolphin(\d+)$/
+        next if $1.to_i > 2
         index[:captures] << i
-      when /^transfer\d+$/
+      when /^transfer(\d+)$/
+        next if $1.to_i > 2
         index[:transfers] << i
+      when /^dma(\d+)$/
+        next if $1.to_i > 2
+        index[:dmas] << i
       when /^sync/
         index[:syncer] = i
       when /^upload/
@@ -42,6 +50,12 @@ class Parser
         index[:downloader] = i
       when /^encode/
         index[:encoder] = i
+      when /^send/
+        index[:sender] = i
+      when /^receive/
+        index[:receiver] = i
+      when /^dma/
+        index[:dma] = i
       when /^num/
         index[:frame_num] = i
       when /^dropped/
@@ -53,6 +67,28 @@ class Parser
 
     # Parse content
     lines.each_with_index do |cols, row|
+
+      for i in 1...cols.length do
+        next if i-1 == index[:hdr]
+        diff = (cols[i].to_f - cols[i-1].to_f)
+        if diff > 0.5 and diff < 1.5
+          puts "Clock jump, row #{row} diff #{headers[i-1]} to #{headers[i]}: #{diff}"
+          puts headers[(i-4)..i+1].map{|x| x.rjust(20)}.join(" ")
+          puts lines[row-3][(i-4)..i+1].join(" ")
+          puts lines[row-2][(i-4)..i+1].join(" ")
+          puts lines[row-1][(i-4)..i+1].join(" ")
+          puts cols[(i-4)..i+1].join(" ")
+          puts lines[row+1][(i-4)..i+1].join(" ")
+          puts lines[row+2][(i-4)..i+1].join(" ")
+          puts lines[row+3][(i-4)..i+1].join(" ")
+
+          for j in index[:transfers] do
+            print cols[j]
+            print " - "
+          end
+          puts ""
+        end
+      end
 
       elem = {}
 
@@ -84,13 +120,30 @@ class Parser
       elem[:transfer] = transfer.mean
       elem[:transfer_diff] = transfer.max - transfer.min
 
-      elem[:sync] = cols[index[:syncer]].to_f if index[:syncer]
-      elem[:upload] = cols[index[:uploader]].to_f if index[:uploader]
-      elem[:bayer] = cols[index[:bayer]].to_f if index[:bayer]
-      elem[:stitch] = cols[index[:stitcher]].to_f if index[:stitcher]
-      elem[:download] = cols[index[:downloader]].to_f if index[:downloader]
+      # Find dma times
+      dmas = []
+      for i in index[:dmas] do
+        dmas << cols[i].to_f
+      end
+
+      elem[:dmas] = dmas.mean
+      elem[:dmas_diff] = dmas.max - dmas.min
+
+
+      elem[:sync] = cols[index[:syncer]].to_f
+      elem[:upload] = cols[index[:uploader]].to_f
+      elem[:bayer] = cols[index[:bayer]].to_f
+      elem[:stitch] = cols[index[:stitcher]].to_f
+      elem[:download] = cols[index[:downloader]].to_f
+      elem[:hdr] = cols[index[:hdr]].to_f
+      elem[:dma] = cols[index[:dma]].to_f
+      elem[:send] = cols[index[:sender]].to_f
+      elem[:receive] = cols[index[:receiver]].to_f
 
       elem[:encode] = cols[index[:encoder]].to_f
+
+      elem[:dropped] = cols[index[:dropped]].to_f
+      elem[:frame_num] = cols[index[:frame_num]].to_f
 
       #puts cols.inspect
 
@@ -99,21 +152,35 @@ class Parser
   end
 
   def report
-    methods = ["mean", "standard_deviation", "min", "max", "variance", "mode", ["percentile", 25], "median", ["percentile", 75], ["percentile", 95.3]]
+    methods = ["mean", "standard_deviation", "min", "max", "variance", "mode", ["percentile", 25], "median", ["percentile", 75], ["percentile", 99.9]]
     report_header(*methods)
     report_single(:ts_diff, "Timestamp difference", *methods)
     report_line(:ts, :capture, "Capture time", *methods)
-    report_line(:capture, :transfer, "Transfer time", *methods)
+    report_line(:capture, :dmas, "Transfer time", *methods)
+    report_line(:dmas, :transfer, "DMA time", *methods)
     report_line(:transfer, :sync, "Sync time", *methods)
-    if @uploader
+    if false
       report_line(:sync, :upload, "Upload time", *methods)
       report_line(:upload, :bayer, "Bayer time", *methods)
     else
       report_line(:sync, :bayer, "Bayer time", *methods)
     end
-    report_line(:bayer, :stitch, "Stitch time", *methods)
-    report_line(:stitch, :download, "Download time", *methods)
-    report_line(:download, :encode, "Encode time", *methods)
+
+    if false
+      report_line(:bayer, :hdr, "HDR time", *methods)
+      report_line(:hdr, :stitch, "Stitch time", *methods)
+    else
+      report_line(:bayer, :stitch, "Stitch time", *methods)
+    end
+    if false
+      report_line(:stitch, :download, "Download time", *methods)
+      report_line(:download, :dma, "Transfer time", *methods)
+    else
+      report_line(:stitch, :dma, "Send time", *methods)
+    end
+    report_line(:dma, :send, "DMA time", *methods)
+    report_line(:send, :receive, "Receive time", *methods)
+    report_line(:receive, :encode, "Encode time", *methods)
     report_line(:ts, :encode, "Total time", *methods)
   end
 
@@ -129,7 +196,13 @@ class Parser
   def diffs(s1, s2)
     diffs = []
     for i in 1...@data.length do
-      diffs << (@data[i][s1] - @data[i][s2]).abs
+      next if @data[i][:dropped] == 1 or @data[i-1][:dropped] == 1
+      diff = (@data[i][s1] - @data[i][s2]).abs
+      if diff > 0.75
+        puts "Warn!"
+        next
+      end
+      diffs << diff
     end
     diffs
   end
